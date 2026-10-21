@@ -180,37 +180,3 @@ def analyze_image_bytes(data: bytes, **options: Any) -> dict[str, Any]:
     if image is None:
         raise ValueError("Uploaded file is not a supported image")
     return analyze_image(image, **options)
-
-
-def measure_rois(
-    image: np.ndarray,
-    rois: list[dict[str, int]],
-    *,
-    rolling_radius: int | None = None,
-) -> list[dict[str, Any]]:
-    """Measure background-corrected IOD for the supplied pixel-coordinate ROIs."""
-    gray = _gray(image)
-    height, width = gray.shape
-    edge = max(2, min(height, width) // 40)
-    border = np.concatenate((gray[:edge].ravel(), gray[-edge:].ravel(),
-                             gray[:, :edge].ravel(), gray[:, -edge:].ravel()))
-    polarity = 1 if np.median(border) < np.median(gray) else -1
-    radius = rolling_radius or max(12, min(height, width) // 45)
-    background = rolling_ball(gray, radius=radius).astype(np.float32)
-    signal = np.maximum(polarity * (gray - background), 0)
-    saturated = gray >= 250 if polarity > 0 else gray <= 5
-    measurements: list[dict[str, Any]] = []
-    for index, roi in enumerate(rois):
-        x1, x2 = max(0, int(roi["x1"])), min(width, int(roi["x2"]))
-        y1, y2 = max(0, int(roi["y1"])), min(height, int(roi["y2"]))
-        if x2 <= x1 or y2 <= y1:
-            raise ValueError(f"ROI {index + 1} has invalid bounds")
-        area = signal[y1:y2, x1:x2]
-        sat_fraction = float(saturated[y1:y2, x1:x2].mean())
-        measurements.append({
-            "index": index,
-            "iod": float(area.sum()),
-            "saturated_fraction": sat_fraction,
-            "quantification_usable": sat_fraction < 0.01,
-        })
-    return measurements

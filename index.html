@@ -10,7 +10,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="#" aria-label="GelLens 首页"><span class="brand-mark">G</span><span>GelLens</span></a>
-    <div class="top-context"><span class="status-dot"></span>Python CV · 本地服务优先</div>
+    <div class="top-context"><span class="status-dot"></span>本地分析工作区</div>
     <button class="button button-quiet" id="exportBtn" disabled>导出结果 CSV</button>
   </header>
   <main class="shell">
@@ -22,7 +22,7 @@
       <div class="image-column">
         <div class="panel image-panel">
           <div class="panel-head"><div><h2>胶图</h2><p>上传未饱和的原始图像，选择泳道后检查识别结果。</p></div><button class="button button-primary" id="uploadBtn">上传图像</button><input id="fileInput" type="file" accept="image/*" hidden></div>
-          <div class="canvas-wrap" id="canvasWrap"><div class="empty-state" id="emptyState"><div class="upload-icon">↑</div><strong>将胶图拖到这里</strong><span>或点击“上传图像”选择文件</span><small>PNG、JPG、TIFF · Python 服务不保存上传图像</small></div><canvas id="gelCanvas" hidden></canvas></div>
+          <div class="canvas-wrap" id="canvasWrap"><div class="empty-state" id="emptyState"><div class="upload-icon">↑</div><strong>将胶图拖到这里</strong><span>或点击“上传图像”选择文件</span><small>PNG、JPG、TIFF · 图像仅在当前浏览器中处理</small></div><canvas id="gelCanvas" hidden></canvas></div>
           <div class="edit-toolbar"><div class="mode-group"><button class="mode-button active" data-mode="select" disabled>选择 / 拖动</button><button class="mode-button" data-mode="lane" disabled>框选泳道</button><button class="mode-button" data-mode="band" disabled>框选条带</button></div><div class="edit-actions"><button class="button button-quiet" id="recognizeSelectionBtn" disabled>识别选区</button><button class="text-button" id="deleteSelectionBtn" disabled>删除选中框</button></div></div>
           <div class="image-toolbar"><div class="legend"><span><i class="legend-lane"></i>泳道</span><span><i class="legend-band"></i>条带</span><span><i class="legend-selected"></i>当前选择</span><span id="editStatus">拖动鼠标框选，或选择并拖动已有框</span></div><button class="text-button" id="resetBtn" disabled>重新识别全部</button></div>
         </div>
@@ -41,7 +41,6 @@
     <section class="panel results-panel" id="resultsPanel"><div class="panel-head"><div><h2>识别结果</h2><p>切换泳道查看对应条带的 IOD；完成标注后可继续计算分子量与浓度。</p></div><span class="chip chip-muted" id="resultCount">等待上传胶图</span></div><div class="lane-tabs" id="resultLaneTabs" role="tablist" aria-label="选择泳道"></div><div class="table-scroll"><table><thead><tr><th>条带</th><th>位置 y</th><th>Rf</th><th>IOD</th><th>分子量</th><th>浓度</th><th>状态</th></tr></thead><tbody id="resultsBody"><tr><td colspan="7" class="table-empty">上传胶图后将自动识别并显示条带 IOD。</td></tr></tbody></table></div></section>
     <footer>GelLens <span>·</span> 基于传统图像处理的凝胶分析原型</footer>
   </main>
-  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
