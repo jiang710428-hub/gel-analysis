@@ -3,7 +3,7 @@
   const $ = (id) => document.getElementById(id);
   const canvas = $('gelCanvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
   const sourceCanvas=document.createElement('canvas'),sourceCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});
-  const state = { image: null, imageName: '', lanes: [], laneWidth: null, bandHeight: null, selectedLane: -1, selectedBand: -1, selectedResultLane: 0, markerLaneIndex: null, referenceLaneIndex: null, referenceBandKey: '', polarity: 1, results: [], calibration: null, editMode: 'select', selection: null, gesture: null };
+  const state = { image: null, imageFile: null, imageName: '', analysisEngine: 'browser', lanes: [], laneWidth: null, bandHeight: null, selectedLane: -1, selectedBand: -1, selectedResultLane: 0, markerLaneIndex: null, referenceLaneIndex: null, referenceBandKey: '', polarity: 1, results: [], calibration: null, editMode: 'select', selection: null, gesture: null };
   const palette = ['#347fc2','#4b9a80','#ad7bce','#cf8852','#5c91a9','#c46c80','#84964c','#7381c5'];
   const input = $('fileInput');
 
@@ -26,8 +26,8 @@
   $('mwUnit').onchange = (e) => { const lane=state.markerLaneIndex==null?null:state.lanes[state.markerLaneIndex],hasValues=lane?.bands.some(b=>b.mw!=null);if(hasValues&&!confirm('更改单位后，已填写的 Marker 数值需要重新录入。继续更改？')){e.target.value=e.target.value==='bp'?'kDa':'bp';return;}if(lane)lane.bands.forEach(b=>b.mw=null);invalidate();renderAnnotation(); };
   $('wellY').oninput = () => invalidate();
   $('gelEndY').oninput = () => invalidate();
-  $('laneWidth').oninput = () => { state.laneWidth=+$('laneWidth').value;regularizeLaneGeometry();invalidate();render(); };
-  $('bandHeight').oninput = () => { state.bandHeight=+$('bandHeight').value;regularizeLaneGeometry();invalidate();render(); };
+  $('laneWidth').oninput = () => { state.laneWidth=+$('laneWidth').value;regularizeLaneGeometry();invalidate();render();schedulePythonMeasurements(); };
+  $('bandHeight').oninput = () => { state.bandHeight=+$('bandHeight').value;regularizeLaneGeometry();invalidate();render();schedulePythonMeasurements(); };
   $('calculateBtn').onclick = calculate;
   $('exportBtn').onclick = exportCsv;
   canvas.addEventListener('pointerdown',onCanvasPointerDown);
@@ -38,7 +38,7 @@
   function numberOrNull(v) { const n = Number(v); return v === '' || !Number.isFinite(n) ? null : n; }
   function loadFile(file) {
     const url = URL.createObjectURL(file), img = new Image();
-    img.onload = () => { URL.revokeObjectURL(url); state.image = img; state.imageName = file.name;state.laneWidth=null;state.bandHeight=null; canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; sourceCanvas.width=img.naturalWidth;sourceCanvas.height=img.naturalHeight;sourceCtx.drawImage(img,0,0);ctx.drawImage(img,0,0); $('emptyState').hidden = true; canvas.hidden = false; $('sensitivity').disabled = false; $('resetBtn').disabled = false; document.querySelectorAll('[data-mode]').forEach(b=>b.disabled=false); $('wellY').value=0; $('gelEndY').value=img.naturalHeight; $('imageInfo').textContent = `${img.naturalWidth} × ${img.naturalHeight} px · ${file.name}`; runDetection(); };
+    img.onload = () => { URL.revokeObjectURL(url); state.image = img; state.imageFile = file; state.imageName = file.name;state.laneWidth=null;state.bandHeight=null; canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; sourceCanvas.width=img.naturalWidth;sourceCanvas.height=img.naturalHeight;sourceCtx.drawImage(img,0,0);ctx.drawImage(img,0,0); $('emptyState').hidden = true; canvas.hidden = false; $('sensitivity').disabled = false; $('resetBtn').disabled = false; document.querySelectorAll('[data-mode]').forEach(b=>b.disabled=false); $('wellY').value=0; $('gelEndY').value=img.naturalHeight; $('imageInfo').textContent = `${img.naturalWidth} × ${img.naturalHeight} px · ${file.name}`; runDetection(); };
     img.onerror = () => { URL.revokeObjectURL(url); alert('无法读取该图像，请尝试 PNG 或 JPG 格式。'); };
     img.src = url;
   }
@@ -57,7 +57,100 @@
     for(let i=0;i<profile.length;i++){if(profile[i]>=threshold){if(start<0)start=i;last=i;}else if(start>=0&&i-last>gap){if(last-start+1>=minWidth)regions.push([start,last]);start=-1;last=-1;}}
     if(start>=0&&last-start+1>=minWidth)regions.push([start,last]); return regions;
   }
-  function runDetection() {
+  async function analyzeWithPython(file, roi = null) {
+    const params = new URLSearchParams({sensitivity: $('sensitivity').value});
+    if (roi) for (const [key, value] of Object.entries(roi)) params.set(key, String(Math.round(value)));
+    const apiBase = window.GELLENS_API_BASE || '';
+    const response = await fetch(`${apiBase}/api/analyze?${params}`, {
+      method: 'POST',
+      headers: {'Content-Type': file.type || 'application/octet-stream'},
+      body: file
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `Python 服务返回 ${response.status}`);
+    return payload;
+  }
+  function schedulePythonMeasurements() {
+    if (state.analysisEngine !== 'python' || !state.imageFile) return;
+    clearTimeout(state.measurementTimer);
+    state.measurementTimer = setTimeout(async () => {
+      const requestId = (state.measureRequestId || 0) + 1;
+      state.measureRequestId = requestId;
+      const bands = state.lanes.flatMap(lane => lane.bands);
+      if (!bands.length) return;
+      const form = new FormData();
+      form.append('image', state.imageFile, state.imageFile.name);
+      form.append('rois', JSON.stringify(bands.map(b => ({x1:b.x1,x2:b.x2,y1:b.y1,y2:b.y2}))));
+      try {
+        const apiBase = window.GELLENS_API_BASE || '';
+        const response = await fetch(`${apiBase}/api/measure`, {method:'POST',body:form});
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.detail || `Python 服务返回 ${response.status}`);
+        if (requestId !== state.measureRequestId) return;
+        result.measurements.forEach((value, index) => {
+          if (bands[index]) Object.assign(bands[index], {iod:value.iod,saturated_fraction:value.saturated_fraction,quantification_usable:value.quantification_usable});
+        });
+        renderResultTable(); renderAnnotation(); draw();
+        if (canCalculateAnything()) calculate(false);
+      } catch (error) {
+        if (requestId === state.measureRequestId) console.info('Python IOD measurement failed:', error.message);
+      }
+    }, 250);
+  }
+  function mapPythonLanes(result) {
+    state.polarity = result.polarity;
+    return result.lanes.map((lane, li) => ({
+      x1: lane.x1, x2: lane.x2, role: 'sample', volume: null, confidence: lane.confidence,
+      bands: lane.bands.map((band, bi) => ({
+        ...band, yCenter: band.y_center, mw: null, reference: false, refConc: null,
+        id: band.id || `${li}-${bi}`
+      }))
+    }));
+  }
+  function preserveAnnotations(detected, previous) {
+    detected.forEach(lane => {
+      const old = previous.reduce((best, candidate) => !best || Math.abs((candidate.x1+candidate.x2)/2-(lane.x1+lane.x2)/2) < Math.abs((best.x1+best.x2)/2-(lane.x1+lane.x2)/2) ? candidate : best, null);
+      if (!old || Math.abs((old.x1+old.x2-lane.x1-lane.x2)/2) > canvas.width*.06) return;
+      lane.role = old.role; lane.volume = old.volume;
+      lane.bands.forEach(band => {
+        const match = old.bands.reduce((best, candidate) => !best || Math.abs(candidate.yCenter-band.yCenter) < Math.abs(best.yCenter-band.yCenter) ? candidate : best, null);
+        if (match && Math.abs(match.yCenter-band.yCenter) < canvas.height*.025) Object.assign(band, {mw:match.mw,reference:match.reference,refConc:match.refConc,refVolume:match.refVolume,manual:match.manual});
+      });
+    });
+    return detected;
+  }
+  async function runDetection() {
+    if (!state.image) return;
+    const requestId = (state.detectionRequestId || 0) + 1;
+    state.detectionRequestId = requestId;
+    const previous = state.lanes, manualLanes = previous.filter(l => l.manual);
+    $('detectionInfo').textContent = 'Python 图像算法识别中…';
+    try {
+      const result = await analyzeWithPython(state.imageFile);
+      if (requestId !== state.detectionRequestId) return;
+      let lanes = preserveAnnotations(mapPythonLanes(result), previous);
+      const movedManual = manualLanes.filter(l => Number.isFinite(l.originalAutoCenter));
+      lanes = lanes.filter(l => !movedManual.some(m => Math.abs((l.x1+l.x2)/2-m.originalAutoCenter) < Math.max(8,(m.x2-m.x1)*.5)));
+      manualLanes.forEach(manual => { const center=(manual.x1+manual.x2)/2, duplicate=lanes.some(l=>Math.abs((l.x1+l.x2)/2-center)<Math.max(8,(manual.x2-manual.x1)*.5)); if(!duplicate||Number.isFinite(manual.originalAutoCenter))lanes.push(manual); });
+      state.analysisEngine = 'python'; state.lanes = lanes;
+      finishDetection();
+      $('detectionInfo').textContent += ' · Python CV';
+      schedulePythonMeasurements();
+    } catch (error) {
+      if (requestId !== state.detectionRequestId) return;
+      state.analysisEngine = 'browser';
+      runBrowserDetection();
+      $('detectionInfo').textContent += ' · 浏览器算法（Python 服务未连接）';
+      console.info('Python CV unavailable; using browser detector:', error.message);
+    }
+  }
+  function finishDetection() {
+    state.markerLaneIndex=state.lanes.findIndex(l=>l.role==='marker');const refLoc=state.lanes.flatMap((l,li)=>l.bands.map((b,bi)=>b.reference?`${li}:${bi}`:null)).find(Boolean);state.referenceBandKey=refLoc||'';state.referenceLaneIndex=refLoc?+refLoc.split(':')[0]:null;
+    state.selectedLane=state.lanes.length?0:-1;state.selectedBand=state.lanes[0]?.bands.length?0:-1;state.selectedResultLane=0;state.selection=null;state.gesture=null;regularizeLaneGeometry();state.results=[];state.calibration=null;
+    $('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((s,l)=>s+l.bands.length,0)} 条条带`;updateLaneWidthControl();
+    $('calculateBtn').disabled=!state.lanes.length; render();
+  }
+  function runBrowserDetection() {
     if(!state.image)return;
     const previous=state.lanes;
     const manualLanes=previous.filter(l=>l.manual);
@@ -112,10 +205,10 @@
     if(state.bandHeight==null&&heights.length){const m=Math.floor(heights.length/2);state.bandHeight=heights.length%2?heights[m]:(heights[m-1]+heights[m])/2;}
     if(state.bandHeight!=null)state.bandHeight=Math.max(2,Math.min(Math.max(2,Math.floor(canvas.height*.2)),Math.round(state.bandHeight)));
     updateBandHeightControl();
-    const gray=grayData();lanes.forEach((lane,i)=>{
+    const gray=state.analysisEngine==='python'?null:grayData();lanes.forEach((lane,i)=>{
       const center=(lane.x1+lane.x2)/2;lane.x1=Math.max(0,Math.min(canvas.width-width,Math.round(center-width/2)));lane.x2=lane.x1+width;
       const bx1=lane.x1,bx2=lane.x2;
-      lane.bands.forEach(band=>{const centerY=band.yCenter??(band.y1+band.y2)/2,height=state.bandHeight??(band.y2-band.y1),y1=Math.max(0,Math.min(canvas.height-height,Math.round(centerY-height/2)));band.x1=bx1;band.x2=bx2;band.y1=y1;band.y2=y1+height;band.yCenter=(band.y1+band.y2)/2;band.iod=calculateBandIodFromGray(band,gray);});
+      lane.bands.forEach(band=>{const centerY=band.yCenter??(band.y1+band.y2)/2,height=state.bandHeight??(band.y2-band.y1),y1=Math.max(0,Math.min(canvas.height-height,Math.round(centerY-height/2)));band.x1=bx1;band.x2=bx2;band.y1=y1;band.y2=y1+height;band.yCenter=(band.y1+band.y2)/2;if(state.analysisEngine!=='python')band.iod=calculateBandIodFromGray(band,gray);});
     });
     state.lanes=lanes;
     state.markerLaneIndex=markerLane?lanes.indexOf(markerLane):null;
@@ -146,11 +239,32 @@
   function onCanvasPointerDown(event){if(!state.image)return;event.preventDefault();canvas.setPointerCapture(event.pointerId);const p=pointFromEvent(event);if(state.editMode==='lane'||state.editMode==='band'){state.gesture={kind:'draw',mode:state.editMode,start:p,current:p};draw();return;}const hit=hitTest(p);state.selection=hit;if(!hit){updateEditControls();draw();return;}const lane=state.lanes[hit.laneIndex];state.selectedLane=hit.laneIndex;state.selectedResultLane=hit.laneIndex;if(hit.type==='lane')state.gesture={kind:'move-lane',selection:hit,start:p,original:{x1:lane.x1,x2:lane.x2,bands:lane.bands.map(b=>({x1:b.x1,x2:b.x2}))}};else{const band=lane.bands[hit.bandIndex];state.gesture={kind:'move-band',selection:hit,start:p,original:{x1:band.x1??lane.x1,x2:band.x2??lane.x2,y1:band.y1,y2:band.y2}};}updateEditControls();draw();renderResultTable();}
   function hitTest(p){for(let li=state.lanes.length-1;li>=0;li--){const lane=state.lanes[li];for(let bi=lane.bands.length-1;bi>=0;bi--){const b=lane.bands[bi],x1=b.x1??lane.x1,x2=b.x2??lane.x2;if(p.x>=x1&&p.x<=x2&&p.y>=b.y1&&p.y<=b.y2)return{type:'band',laneIndex:li,bandIndex:bi};}if(p.x>=lane.x1&&p.x<=lane.x2)return{type:'lane',laneIndex:li};}return null;}
   function onCanvasPointerMove(event){const g=state.gesture;if(!g)return;event.preventDefault();const p=pointFromEvent(event);if(g.kind==='draw'){g.current=p;draw();return;}const dx=p.x-g.start.x,dy=p.y-g.start.y;if(g.kind==='move-lane'){const lane=state.lanes[g.selection.laneIndex];if(!lane.manual)lane.originalAutoCenter=(lane.x1+lane.x2)/2;lane.manual=true;const width=g.original.x2-g.original.x1,x1=Math.max(0,Math.min(canvas.width-width,g.original.x1+dx)),shift=x1-g.original.x1;lane.x1=x1;lane.x2=x1+width;lane.bands.forEach((b,i)=>{if(b.x1!=null){b.x1=g.original.bands[i].x1+shift;b.x2=g.original.bands[i].x2+shift;}});}else{const lane=state.lanes[g.selection.laneIndex],band=lane.bands[g.selection.bandIndex],height=g.original.y2-g.original.y1,y1=Math.max(0,Math.min(canvas.height-height,g.original.y1+dy));band.x1=lane.x1;band.x2=lane.x2;band.y1=y1;band.y2=y1+height;band.yCenter=y1+height/2;}draw();}
-  function onCanvasPointerUp(event){const g=state.gesture;if(!g)return;const p=pointFromEvent(event);state.gesture=null;if(g.kind==='draw')finishDraw(g,p);else{if(g.kind==='move-band'){const band=state.lanes[g.selection.laneIndex].bands[g.selection.bandIndex];band.iod=calculateBandIod(band);band.manual=true;}else regularizeLaneGeometry();invalidate();render();}}
-  function finishDraw(g,p){const x1=Math.min(g.start.x,p.x),x2=Math.max(g.start.x,p.x),y1=Math.min(g.start.y,p.y),y2=Math.max(g.start.y,p.y);if(g.mode==='lane'){if(x2-x1<Math.max(5,canvas.width*.003)){$('editStatus').textContent='泳道框太窄，请重新框选';draw();return;}const lane=detectLaneBands(grayData(),canvas.width,canvas.height,Math.round(x1),Math.round(x2),state.lanes.length);lane.manual=true;lane.x1=Math.round(x1);lane.x2=Math.round(x2);state.lanes.push(lane);state.selectedLane=state.lanes.length-1;state.selectedResultLane=state.selectedLane;state.selection={type:'lane',laneIndex:state.selectedLane};regularizeLaneGeometry();const li=state.lanes.indexOf(lane);state.selection={type:'lane',laneIndex:li};$('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((n,l)=>n+l.bands.length,0)} 条条带`;$('editStatus').textContent=`已新增泳道 ${li+1}，初步识别 ${lane.bands.length} 条带` ;invalidate();render();return;}const li=state.lanes.findIndex(l=>g.start.x>=l.x1&&g.start.x<=l.x2);if(li<0){$('editStatus').textContent='条带框必须从已有泳道内开始；请先框选泳道';draw();return;}const lane=state.lanes[li],bx1=lane.x1,bx2=lane.x2,by1=Math.round(y1),by2=Math.round(y2);if(x2-x1<2||by2-by1<2){$('editStatus').textContent='条带框太小，请重新框选';draw();return;}const refObject=referenceBand(),band={x1:bx1,x2:bx2,y1:by1,y2:by2,yCenter:(by1+by2)/2,iod:0,mw:null,reference:false,refConc:null,manual:true};band.iod=calculateBandIod(band);lane.bands.push(band);lane.bands.sort((a,b)=>a.yCenter-b.yCenter);const bi=lane.bands.indexOf(band);if(refObject&&state.referenceLaneIndex===li)state.referenceBandKey=`${li}:${lane.bands.indexOf(refObject)}`;state.selection={type:'band',laneIndex:li,bandIndex:bi};state.selectedLane=li;state.selectedResultLane=li;regularizeLaneGeometry();$('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((n,l)=>n+l.bands.length,0)} 条条带`;$('editStatus').textContent=`已框选条带，IOD ${Math.round(band.iod).toLocaleString()}`;invalidate();render();}
+  function onCanvasPointerUp(event){const g=state.gesture;if(!g)return;const p=pointFromEvent(event);state.gesture=null;if(g.kind==='draw')finishDraw(g,p);else{if(g.kind==='move-band'){const band=state.lanes[g.selection.laneIndex].bands[g.selection.bandIndex];if(state.analysisEngine!=='python')band.iod=calculateBandIod(band);band.manual=true;}else regularizeLaneGeometry();invalidate();render();if(state.analysisEngine==='python'){if(g.kind==='move-lane')recognizeSelection();else schedulePythonMeasurements();}}}
+  function finishDraw(g,p){const x1=Math.min(g.start.x,p.x),x2=Math.max(g.start.x,p.x),y1=Math.min(g.start.y,p.y),y2=Math.max(g.start.y,p.y);if(g.mode==='lane'){if(x2-x1<Math.max(5,canvas.width*.003)){$('editStatus').textContent='泳道框太窄，请重新框选';draw();return;}const lane=detectLaneBands(grayData(),canvas.width,canvas.height,Math.round(x1),Math.round(x2),state.lanes.length);lane.manual=true;lane.x1=Math.round(x1);lane.x2=Math.round(x2);state.lanes.push(lane);state.selectedLane=state.lanes.length-1;state.selectedResultLane=state.selectedLane;state.selection={type:'lane',laneIndex:state.selectedLane};regularizeLaneGeometry();const li=state.lanes.indexOf(lane);state.selection={type:'lane',laneIndex:li};$('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((n,l)=>n+l.bands.length,0)} 条条带`;$('editStatus').textContent=`已新增泳道 ${li+1}，初步识别 ${lane.bands.length} 条带` ;invalidate();render();if(state.analysisEngine==='python')recognizeSelection();return;}const li=state.lanes.findIndex(l=>g.start.x>=l.x1&&g.start.x<=l.x2);if(li<0){$('editStatus').textContent='条带框必须从已有泳道内开始；请先框选泳道';draw();return;}const lane=state.lanes[li],bx1=lane.x1,bx2=lane.x2,by1=Math.round(y1),by2=Math.round(y2);if(x2-x1<2||by2-by1<2){$('editStatus').textContent='条带框太小，请重新框选';draw();return;}const refObject=referenceBand(),band={x1:bx1,x2:bx2,y1:by1,y2:by2,yCenter:(by1+by2)/2,iod:0,mw:null,reference:false,refConc:null,manual:true};band.iod=calculateBandIod(band);lane.bands.push(band);lane.bands.sort((a,b)=>a.yCenter-b.yCenter);const bi=lane.bands.indexOf(band);if(refObject&&state.referenceLaneIndex===li)state.referenceBandKey=`${li}:${lane.bands.indexOf(refObject)}`;state.selection={type:'band',laneIndex:li,bandIndex:bi};state.selectedLane=li;state.selectedResultLane=li;regularizeLaneGeometry();$('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((n,l)=>n+l.bands.length,0)} 条条带`;$('editStatus').textContent=`已框选条带，IOD ${Math.round(band.iod).toLocaleString()}`;invalidate();render();if(state.analysisEngine==='python')recognizeSelection();}
   function calculateBandIod(band){return calculateBandIodFromGray(band,grayData());}
   function calculateBandIodFromGray(band,gray){const w=canvas.width,h=canvas.height,x1=Math.max(0,Math.floor(band.x1)),x2=Math.min(w,Math.ceil(band.x2)),y1=Math.max(0,Math.floor(band.y1)),y2=Math.min(h,Math.ceil(band.y2));let iod=0;for(let y=y1;y<y2;y++)for(let x=x1;x<x2;x++)iod+=Math.max(0,(gray[y*w+x]-backgroundAt(gray,w,h,x,y))*state.polarity);return iod;}
-  function recognizeSelection(){if(!state.selection){runDetection();return;}if(state.selection.type==='band'){const b=state.lanes[state.selection.laneIndex].bands[state.selection.bandIndex];b.iod=calculateBandIod(b);b.manual=true;invalidate();render();return;}const li=state.selection.laneIndex,lane=state.lanes[li],old=lane.bands,refObject=referenceBand(),next=detectLaneBands(grayData(),canvas.width,canvas.height,lane.x1,lane.x2,li);next.manual=lane.manual;next.role=lane.role;next.bands.forEach(b=>{const prior=old.reduce((best,candidate)=>!best||Math.abs(candidate.yCenter-b.yCenter)<Math.abs(best.yCenter-b.yCenter)?candidate:best,null);if(prior&&Math.abs(prior.yCenter-b.yCenter)<canvas.height*.025)Object.assign(b,{mw:prior.mw,reference:prior.reference,refConc:prior.refConc,refVolume:prior.refVolume});});old.filter(b=>b.manual).forEach(manualBand=>{if(!next.bands.some(b=>Math.abs(b.yCenter-manualBand.yCenter)<canvas.height*.01))next.bands.push(manualBand);});next.bands.sort((a,b)=>a.yCenter-b.yCenter);state.lanes[li]=next;if(refObject&&state.referenceLaneIndex===li){const newRefIndex=next.bands.findIndex(b=>b.reference);state.referenceBandKey=newRefIndex<0?'':`${li}:${newRefIndex}`;}state.selection={type:'lane',laneIndex:li};regularizeLaneGeometry();$('detectionInfo').textContent=`泳道 ${li+1} 重新识别出 ${next.bands.length} 条带`;$('editStatus').textContent=`泳道 ${li+1} 已重新识别`;invalidate();render();}
+  async function recognizeSelection(){
+    if(!state.selection){runDetection();return;}
+    const selection=state.selection,li=selection.laneIndex,lane=state.lanes[li];
+    if(state.analysisEngine==='python'){
+      try{
+        if(selection.type==='band'){
+          const band=lane.bands[selection.bandIndex],pad=Math.max(4,(band.y2-band.y1)*1.5);
+          const result=await analyzeWithPython(state.imageFile,{roi_x1:lane.x1,roi_x2:lane.x2,roi_y1:Math.max(0,band.y1-pad),roi_y2:Math.min(canvas.height,band.y2+pad)});
+          const detected=result.lanes.flatMap(l=>l.bands).sort((a,b)=>Math.abs(a.y_center-band.yCenter)-Math.abs(b.y_center-band.yCenter))[0];
+          if(detected){band.iod=detected.iod;band.confidence=detected.confidence;band.saturated_fraction=detected.saturated_fraction;band.quantification_usable=detected.quantification_usable;}
+          band.manual=true;invalidate();render();schedulePythonMeasurements();return;
+        }
+        const old=lane.bands,refObject=referenceBand();
+        const result=await analyzeWithPython(state.imageFile,{roi_x1:lane.x1,roi_x2:lane.x2,roi_y1:0,roi_y2:canvas.height});
+        const candidate=mapPythonLanes(result).sort((a,b)=>b.bands.length-a.bands.length)[0];
+        if(candidate){candidate.x1=lane.x1;candidate.x2=lane.x2;candidate.manual=lane.manual;candidate.role=lane.role;preserveAnnotations([candidate],[lane]);old.filter(b=>b.manual).forEach(manualBand=>{if(!candidate.bands.some(b=>Math.abs(b.yCenter-manualBand.yCenter)<canvas.height*.01))candidate.bands.push(manualBand);});candidate.bands.sort((a,b)=>a.yCenter-b.yCenter);state.lanes[li]=candidate;if(refObject&&state.referenceLaneIndex===li){const newRefIndex=candidate.bands.findIndex(b=>b.reference);state.referenceBandKey=newRefIndex<0?'':`${li}:${newRefIndex}`;}}
+        state.analysisEngine='python';state.selection={type:'lane',laneIndex:li};regularizeLaneGeometry();$('detectionInfo').textContent=`泳道 ${li+1} 重新识别出 ${state.lanes[li].bands.length} 条带 · Python CV`;$('editStatus').textContent=`泳道 ${li+1} 已由 Python 重新识别`;invalidate();render();schedulePythonMeasurements();return;
+      }catch(error){$('editStatus').textContent=`Python 识别失败，已使用浏览器算法：${error.message}`;}
+    }
+    if(selection.type==='band'){const b=state.lanes[li].bands[selection.bandIndex];b.iod=calculateBandIod(b);b.manual=true;invalidate();render();return;}
+    const old=lane.bands,refObject=referenceBand(),next=detectLaneBands(grayData(),canvas.width,canvas.height,lane.x1,lane.x2,li);next.manual=lane.manual;next.role=lane.role;next.bands.forEach(b=>{const prior=old.reduce((best,candidate)=>!best||Math.abs(candidate.yCenter-b.yCenter)<Math.abs(best.yCenter-b.yCenter)?candidate:best,null);if(prior&&Math.abs(prior.yCenter-b.yCenter)<canvas.height*.025)Object.assign(b,{mw:prior.mw,reference:prior.reference,refConc:prior.refConc,refVolume:prior.refVolume});});old.filter(b=>b.manual).forEach(manualBand=>{if(!next.bands.some(b=>Math.abs(b.yCenter-manualBand.yCenter)<canvas.height*.01))next.bands.push(manualBand);});next.bands.sort((a,b)=>a.yCenter-b.yCenter);state.lanes[li]=next;if(refObject&&state.referenceLaneIndex===li){const newRefIndex=next.bands.findIndex(b=>b.reference);state.referenceBandKey=newRefIndex<0?'':`${li}:${newRefIndex}`;}state.analysisEngine='browser';state.selection={type:'lane',laneIndex:li};regularizeLaneGeometry();$('detectionInfo').textContent=`泳道 ${li+1} 重新识别出 ${next.bands.length} 条带 · 浏览器算法`;$('editStatus').textContent=`泳道 ${li+1} 已重新识别`;invalidate();render();
+  }
   function deleteSelection(){if(!state.selection)return;const s=state.selection;if(s.type==='lane'){state.lanes.splice(s.laneIndex,1);if(state.markerLaneIndex===s.laneIndex)state.markerLaneIndex=null;else if(state.markerLaneIndex>s.laneIndex)state.markerLaneIndex--;if(state.referenceLaneIndex===s.laneIndex){state.referenceLaneIndex=null;state.referenceBandKey='';}else if(state.referenceLaneIndex>s.laneIndex){state.referenceLaneIndex--;if(state.referenceBandKey)state.referenceBandKey=`${state.referenceLaneIndex}:${state.referenceBandKey.split(':')[1]}`;}if(state.selectedResultLane>=state.lanes.length)state.selectedResultLane=Math.max(0,state.lanes.length-1);}else{const lane=state.lanes[s.laneIndex];lane.bands.splice(s.bandIndex,1);if(state.referenceBandKey){const [li,bi]=state.referenceBandKey.split(':').map(Number);if(li===s.laneIndex&&bi===s.bandIndex){state.referenceBandKey='';state.referenceLaneIndex=null;}else if(li===s.laneIndex&&bi>s.bandIndex)state.referenceBandKey=`${li}:${bi-1}`;}}state.selection=null;if(s.type==='lane')regularizeLaneGeometry();$('detectionInfo').textContent=`检测到 ${state.lanes.length} 条泳道 · ${state.lanes.reduce((n,l)=>n+l.bands.length,0)} 条条带`;invalidate();render();}
   function draw(){if(!state.image)return;ctx.drawImage(state.image,0,0);state.lanes.forEach((lane,li)=>{const laneSelected=state.selection?.type==='lane'&&state.selection.laneIndex===li;ctx.fillStyle=laneSelected?'rgba(231,158,68,.10)':'rgba(45,126,197,.045)';ctx.fillRect(lane.x1,0,lane.x2-lane.x1,canvas.height);ctx.strokeStyle=laneSelected?'#e09b42':palette[li%palette.length];ctx.lineWidth=Math.max(1,canvas.width/900);ctx.setLineDash(lane.manual?[5,4]:[]);ctx.strokeRect(lane.x1,0,lane.x2-lane.x1,canvas.height);ctx.setLineDash([]);ctx.fillStyle=palette[li%palette.length];ctx.font=`${Math.max(10,canvas.width/90)}px sans-serif`;ctx.fillText(`L${li+1}${lane.manual?' · 手动':''}`,lane.x1+3,Math.max(14,canvas.height*.03));lane.bands.forEach((band,bi)=>{const x1=band.x1??lane.x1,x2=band.x2??lane.x2,selected=state.selection?.type==='band'&&state.selection.laneIndex===li&&state.selection.bandIndex===bi;ctx.fillStyle=selected?'rgba(231,158,68,.45)':'rgba(25,139,113,.30)';ctx.fillRect(x1,band.y1,x2-x1,Math.max(2,band.y2-band.y1));ctx.strokeStyle=selected?'#e09b42':'#16826d';ctx.lineWidth=Math.max(1,canvas.width/850);ctx.setLineDash(band.manual?[4,3]:[]);ctx.strokeRect(x1,band.y1,x2-x1,Math.max(2,band.y2-band.y1));ctx.setLineDash([]);});});const g=state.gesture;if(g?.kind==='draw'){const x=Math.min(g.start.x,g.current.x),y=Math.min(g.start.y,g.current.y),w=Math.abs(g.current.x-g.start.x),h=Math.abs(g.current.y-g.start.y);ctx.fillStyle='rgba(45,126,197,.12)';ctx.fillRect(x,y,w,h);ctx.strokeStyle='#267db9';ctx.lineWidth=Math.max(2,canvas.width/700);ctx.setLineDash([7,5]);ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);}}
   function hasValidReference(){return state.lanes.some(l=>l.bands.some(b=>b.reference&&b.refConc>0&&b.iod>0));}

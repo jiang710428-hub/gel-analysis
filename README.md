@@ -1,32 +1,37 @@
-# GelLens 凝胶电泳分析原型
+# GelLens 凝胶电泳分析
 
-这是一个凝胶分析前端原型和独立 Python 图像算法/计算模块，用于验证“泳道/条带检测 → 用户标注 → 分子量与浓度估算”的工作流。当前目录没有既有应用框架，因此浏览器原型不依赖后端或安装步骤。
+GelLens 提供凝胶图像泳道/条带识别、IOD 测量、Marker 与浓度标注、结果估算和 CSV 导出。网页上传后优先调用 Python OpenCV + scikit-image 算法；如果后端不可用，网页会提示并回退到浏览器识别器。
 
-## 使用
+## 启动完整的 Python 版本
 
-直接用现代浏览器打开 `index.html`，上传 PNG 或 JPG 胶图。图像处理完全在浏览器内执行，不会上传到服务器。
+需要 Python 3.10 或更新版本。Windows PowerShell 中在项目目录执行：
 
-1. 调整识别灵敏度并查看自动泳道与条带框；识别结果会按泳道切换查看。可切换“框选泳道”或“框选条带”模式，在图像上拖动新增 ROI；切回“选择/拖动”后移动已有框，也可删除选中框或对选区重新识别。
-2. 在“标注与计算”卡片选择 Marker 泳道，为该泳道的每条带填写已知分子量。所有 Marker 使用同一单位（bp 或 kDa）。
-3. 在同一卡片选择浓度参考条带并填写其已知浓度。参考条带浓度会立即显示，其他泳道（包括 Marker 泳道）的条带浓度按参考 IOD 比例估算。
-4. Marker 条带显示用户填写的已知分子量；其余条带需至少 2 个 Marker 标定值才能拟合分子量。设置加样孔 y 与凝胶终点 y 后，分子量按迁移位置估算。结果可导出 CSV。
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn server:app --host 127.0.0.1 --port 8000
+```
 
-## Python 图像算法
+然后浏览器打开 <http://127.0.0.1:8000>。不要直接双击 `index.html`，否则浏览器不能访问本机 Python 服务。
 
-`gel_analysis.py` 提供 OpenCV 解码与灰度转换、scikit-image rolling-ball 背景校正、SciPy 投影/峰检测，并输出泳道/条带 ROI、IOD、饱和比例和检测置信度。安装 `requirements.txt` 中的依赖后，可通过 `analyze_image(image_array)` 处理 OpenCV 图像数组，或用 `analyze_image_bytes(upload_bytes)` 处理上传文件字节。
+上传图像通过 `POST /api/analyze` 发送到服务内存中处理，不写入磁盘。接口会返回泳道/条带坐标、IOD、检测置信度、饱和比例和背景校正方式。`POST /api/analyze` 支持灵敏度 `1–5` 以及 `roi_x1`、`roi_x2`、`roi_y1`、`roi_y2` 区域参数；`GET /api/health` 可检查服务状态。图像大小上限为 25 MB。
 
-`gel_calculations.py` 将迁移率拟合与 IOD 浓度换算拆分为两个独立函数：`fit_molecular_weight(...)` 和 `estimate_concentrations(...)`。检测、人工标注、校准和定量之间使用普通字典数据结构，便于后续接入 FastAPI/Flask API 或桌面客户端。
+## GitHub Pages 与 Python 服务
 
-## 当前计算逻辑
+GitHub Pages 只能托管静态前端，不能运行此项目的 Python/OpenCV 算法。Pages 页面会回退到浏览器算法。要让 Pages 调用单独部署的 Python API：
 
-- 泳道识别：基于相对边缘背景的垂直强度投影与连续区间检测。
-- 条带识别：逐泳道计算背景校正后的水平强度剖面，并按灵敏度阈值定位峰区。
-- IOD：在条带区域内累计正向、局部背景校正后的像素强度。
-- 分子量：以 `Rf = (y - y_well) / (y_gel_end - y_well)` 计算迁移率，对已标注 Marker 拟合 `log10(MW) = k × Rf + b`。
-- 浓度：以参考条带为基准，使用 `C = Cref × (IOD / IODref) × (Vref / V)`；未填写任一体积时按上样体积相同处理。
+1. 将 `server.py` 和 Python 依赖部署到支持 ASGI/FastAPI 的服务，并确认 `/api/health` 可访问。
+2. 编辑 `config.js`，把 `window.GELLENS_API_BASE` 设为 API 服务的 HTTPS 源站地址（不要在地址末尾加路径）。
+3. 将更新后的 `config.js` 推送到 `main`，GitHub Pages 会重新发布。
 
-## 适用范围与后续工程化
+也可以把整个项目作为一个 FastAPI 服务运行，这样网页和 API 共用一个源站，不需要修改 `config.js`。公开部署时请使用 HTTPS，并为服务配置访问限制和资源额度。
 
-这是用于流程和算法交互验证的 MVP，不是经验证的实验室定量软件。浏览器界面目前使用轻量投影算法并在本地运行；Python OpenCV/scikit-image 模块已经独立实现，但尚未接入浏览器界面。复杂背景、弯曲泳道、相邻粘连条带及极弱条带需要人工校正。WB 蛋白实验更适合按同泳道内参计算相对表达量，不应默认套用核酸浓度估算。
+## 标注与计算
 
-后续工程版本建议将图像处理封装为 OpenCV + scikit-image 后端服务，保留前端标注和人工修正能力；引入基于暗场/亮场适配的背景校正、泳道倾斜校正、峰分离、饱和检测和检测置信度；按凝胶类型区分核酸分子量、核酸浓度与 WB 相对表达量。保存原图、ROI、算法版本、用户标注及计算参数，确保结果可追溯。
+1. 上传胶图并检查泳道/条带检测，可通过灵敏度、框选、拖动和删除功能修正识别结果。
+2. 选择 Marker 泳道，填写其中已知条带的分子量。其余条带需至少两个不同迁移位置的 Marker 标注才能拟合分子量。
+3. 选择浓度参考泳道和条带，输入已知浓度；其他条带按 IOD 比例估算浓度。参考条带会显示用户输入的原值。
+4. 设置加样孔 y 和凝胶终点 y 后计算分子量，并可导出 CSV。
+
+分子量与浓度校准目前仍在前端执行；Python 服务负责图像检测和 IOD 测量。浓度估算假设相同上样体积且条带未饱和。该原型尚未验证为实验室定量软件；复杂背景、弯曲泳道、相邻粘连条带及极弱条带仍需人工校正。
